@@ -1,0 +1,46 @@
+# Python-generated files
+__pycache__/
+*.py[cod]
+/build/
+/dist/
+/wheels/
+*.egg-info/
+.eggs/
+
+# Tests, coverage, linters, and type checkers
+.pytest_cache/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Virtual environments
+/.venv/
+/venv/
+/env/
+/ENV/
+
+# Local environment settings
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Editors and notebooks
+/.vscode/*
+!/.vscode/settings.json
+.idea/
+*.iml
+*.swp
+*.swo
+.ipynb_checkpoints/
+
+# Operating system files
+.DS_Store
+Thumbs.db

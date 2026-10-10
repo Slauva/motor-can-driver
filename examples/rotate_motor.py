@@ -2,19 +2,27 @@ from time import sleep
 
 from packages.driver import CanBus, Gyems
 
-bus = CanBus()
-motor = Gyems(bus)
 
-try:
-    motor.enable()
-    motor.set_zero()
-    motor.set_speed(-360)
-    while True:
-        print(motor.info())
-        sleep(0.1)
-except KeyboardInterrupt:
-    pass
+def main() -> None:
+    bus = CanBus(channel=0, bustype="gs_usb", bitrate=1_000_000)
+    motor = Gyems(bus)
 
-finally:
-    motor.disable(True)
-    bus.close()
+    try:
+        motor.enable()
+        motor.set_zero()
+        motor.set_speed(-360)
+        while True:
+            print(motor.info())
+            sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        try:
+            motor.disable(True)
+        finally:
+            bus.close()
+
+
+if __name__ == "__main__":
+    main()

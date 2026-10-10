@@ -4,7 +4,7 @@ version = "0.1.0"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "python-can>=4.6.1",
+    "python-can[gs-usb]>=4.6.1",
 ]
 
 [build-system]

@@ -77,7 +77,7 @@ class DRC06:
         self.bus.send(msg)
         while True:
             response = self.bus.recv(0.1)
-            if response and response.arbitration_id == self.motor_id:
+            if response and response.is_rx and response.arbitration_id == self.motor_id:
                 return response
 
     def read_pid(self) -> tuple[PID, PID, PID]:

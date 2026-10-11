@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from enum import Enum
+from math import isfinite
+from time import monotonic
 
-from can import Message
+from can import CanTimeoutError, Message
 
 from .interface import CanBus
 
@@ -55,7 +57,7 @@ class PID:
 
 class DRC06:
     def __init__(self, bus: CanBus, motor_id: int | None = None, max_torque: float = 6) -> None:
-        self.bus = bus.bus
+        self.bus = bus
         self.motor_id = motor_id if motor_id is not None else MOTOR_ID
         self.max_torque = max_torque
 
@@ -63,20 +65,27 @@ class DRC06:
     def mapper(value: float, i_low: float, i_high: float, o_low: float, o_high) -> float:
         return value / (i_high - i_low) * (o_high - o_low)
 
-    def request(self, data: list[int]) -> Message:
+    def request(self, data: list[int], timeout: float = 1) -> Message:
         """
         The request function sends a message to the motor and waits for a response.
         The function takes in an array of 8 integers, which are sent as the data payload of the CAN message.
         It returns another Message object containing the response from the motor.
 
         :param data: List[int]: Pass the data to be sent to the motor
+        :param timeout: Maximum response wait in seconds
         :return: A message
         :doc-author: Trelent
         """
+        if not isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout must be finite and greater than zero")
         msg = Message(arbitration_id=self.motor_id, data=data, dlc=8, is_extended_id=False)
+        deadline = monotonic() + timeout
         self.bus.send(msg)
         while True:
-            response = self.bus.recv(0.1)
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise CanTimeoutError(f"Motor 0x{self.motor_id:X} did not respond within {timeout:g} s")
+            response = self.bus.recv(min(0.1, remaining))
             if response and response.is_rx and response.arbitration_id == self.motor_id:
                 return response
 

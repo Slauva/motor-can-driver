@@ -1,4 +1,5 @@
 import gc
+import itertools
 import sys
 import threading
 import unittest
@@ -23,6 +24,9 @@ class CanBusLifecycleTests(unittest.TestCase):
         self.bus_factory = patches.enter_context(
             patch("packages.driver.interface.can.Bus", return_value=self.underlying_bus)
         )
+        self.gs_usb_factory = patches.enter_context(
+            patch("packages.driver.gs_usb.GsUsbBus", return_value=self.underlying_bus)
+        )
 
     def create_bus(self, **kwargs) -> CanBus:
         bus = CanBus(**kwargs)
@@ -33,7 +37,8 @@ class CanBusLifecycleTests(unittest.TestCase):
         bus = self.create_bus(bustype="gs_usb")
 
         self.assertEqual(bus.channel, 0)
-        self.bus_factory.assert_called_once_with(interface="gs_usb", channel=0, bitrate=1_000_000)
+        self.gs_usb_factory.assert_called_once_with(channel=0, bitrate=1_000_000)
+        self.bus_factory.assert_not_called()
         bus.close()
 
         self.underlying_bus.shutdown.assert_called_once_with()
@@ -48,10 +53,10 @@ class CanBusLifecycleTests(unittest.TestCase):
         )
         for options in selections:
             with self.subTest(options=options):
-                self.bus_factory.reset_mock()
+                self.gs_usb_factory.reset_mock()
                 bus = self.create_bus(bustype="gs_usb", bitrate=500_000, **options)
 
-                self.bus_factory.assert_called_once_with(interface="gs_usb", bitrate=500_000, **options)
+                self.gs_usb_factory.assert_called_once_with(bitrate=500_000, **options)
                 bus.close()
 
         self.getoutput.assert_not_called()
@@ -61,8 +66,8 @@ class CanBusLifecycleTests(unittest.TestCase):
         filters = [{"can_id": 0x141, "can_mask": 0x7FF, "extended": False}]
         bus = self.create_bus(bustype="gs_usb", can_filters=filters, ignore_config=True)
 
-        self.bus_factory.assert_called_once_with(
-            interface="gs_usb", channel=0, bitrate=1_000_000, can_filters=filters, ignore_config=True
+        self.gs_usb_factory.assert_called_once_with(
+            channel=0, bitrate=1_000_000, can_filters=filters, ignore_config=True
         )
         bus.close()
 
@@ -81,12 +86,12 @@ class CanBusLifecycleTests(unittest.TestCase):
         bus.open()
         bus.open()
 
-        self.bus_factory.assert_called_once_with(interface="gs_usb", channel=0, bitrate=1_000_000)
+        self.gs_usb_factory.assert_called_once_with(channel=0, bitrate=1_000_000)
         self.underlying_bus.shutdown.assert_not_called()
 
     def test_closed_bus_can_be_reopened_and_new_connection_is_closed(self) -> None:
         replacement_bus = Mock(spec=can.BusABC)
-        self.bus_factory.side_effect = [self.underlying_bus, replacement_bus]
+        self.gs_usb_factory.side_effect = [self.underlying_bus, replacement_bus]
         bus = self.create_bus(bustype="gs_usb", channel=1, bitrate=250_000, ignore_config=True)
 
         bus.close()
@@ -94,11 +99,11 @@ class CanBusLifecycleTests(unittest.TestCase):
         self.assertIs(bus.bus, replacement_bus)
         bus.close()
 
-        self.assertEqual(self.bus_factory.call_count, 2)
-        for call in self.bus_factory.call_args_list:
+        self.assertEqual(self.gs_usb_factory.call_count, 2)
+        for call in self.gs_usb_factory.call_args_list:
             self.assertEqual(
                 call.kwargs,
-                {"interface": "gs_usb", "channel": 1, "bitrate": 250_000, "ignore_config": True},
+                {"channel": 1, "bitrate": 250_000, "ignore_config": True},
             )
         self.underlying_bus.shutdown.assert_called_once_with()
         replacement_bus.shutdown.assert_called_once_with()
@@ -107,7 +112,7 @@ class CanBusLifecycleTests(unittest.TestCase):
 
     def test_failed_usb_initialization_keeps_original_error_and_has_no_destructor_error(self) -> None:
         error = can.CanInitializationError("USB device not found")
-        self.bus_factory.side_effect = error
+        self.gs_usb_factory.side_effect = error
 
         with patch.object(sys, "unraisablehook") as unraisable:
             with self.assertRaises(can.CanInitializationError) as raised:
@@ -122,6 +127,65 @@ class CanBusLifecycleTests(unittest.TestCase):
         self.getoutput.assert_not_called()
         self.system.assert_not_called()
         self.underlying_bus.shutdown.assert_not_called()
+
+    def test_operational_error_closes_connection_and_later_requests_do_not_use_it(self) -> None:
+        for operation in ("send", "recv"):
+            with self.subTest(operation=operation):
+                self.underlying_bus.reset_mock(side_effect=True)
+                bus = self.create_bus(bustype="gs_usb")
+                error = can.CanOperationError("USB adapter disconnected")
+                getattr(self.underlying_bus, operation).side_effect = error
+
+                with self.assertRaises(can.CanOperationError) as raised:
+                    if operation == "send":
+                        bus.send(can.Message(arbitration_id=0x141, data=[0xA2]))
+                    else:
+                        bus.recv(0.1)
+
+                self.assertIs(raised.exception, error)
+                self.assertFalse(bus.is_open)
+                self.underlying_bus.shutdown.assert_called_once_with()
+                self.underlying_bus.send.reset_mock()
+                self.underlying_bus.recv.reset_mock()
+                with self.assertRaises(can.CanOperationError):
+                    bus.request(0x141, [0x81])
+                self.underlying_bus.send.assert_not_called()
+                self.underlying_bus.recv.assert_not_called()
+                bus.close()
+                self.underlying_bus.shutdown.assert_called_once_with()
+
+    def test_cleanup_failure_preserves_original_usb_operation_error(self) -> None:
+        bus = self.create_bus(bustype="gs_usb")
+        original = can.CanOperationError("USB overflow")
+        self.underlying_bus.recv.side_effect = original
+        self.underlying_bus.shutdown.side_effect = can.CanOperationError("USB device is gone")
+
+        with self.assertRaises(can.CanOperationError) as raised:
+            bus.recv(0.1)
+
+        self.assertIs(raised.exception, original)
+        self.assertFalse(bus.is_open)
+        bus.close()
+        self.underlying_bus.shutdown.assert_called_once_with()
+
+    def test_request_has_a_total_timeout_and_does_not_resend_motor_command(self) -> None:
+        bus = self.create_bus(bustype="gs_usb")
+        self.underlying_bus.recv.return_value = None
+        ticks = itertools.count(step=0.4)
+        with patch("packages.driver.interface.monotonic", side_effect=lambda: next(ticks)):
+            with self.assertRaises(can.CanTimeoutError):
+                bus.request(0x141, [0xA2], timeout=1.0)
+
+        self.underlying_bus.send.assert_called_once()
+        self.assertLessEqual(self.underlying_bus.recv.call_count, 3)
+        self.assertTrue(bus.is_open, "A response timeout should still allow a motor-stop command")
+
+    def test_request_rejects_invalid_limits_before_sending(self) -> None:
+        bus = self.create_bus(bustype="gs_usb")
+        for limits in ({"timeout": 0}, {"timeout": -1}, {"n_packets": 0}, {"n_packets": -1}):
+            with self.subTest(limits=limits), self.assertRaises(ValueError):
+                bus.request(0x141, [0xA2], **limits)
+        self.underlying_bus.send.assert_not_called()
 
     def test_request_skips_usb_transmit_echoes_and_waits_for_received_frames(self) -> None:
         bus = self.create_bus(bustype="gs_usb")

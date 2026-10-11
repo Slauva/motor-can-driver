@@ -35,6 +35,7 @@ coverage.xml
 # Editors and notebooks
 /.vscode/*
 !/.vscode/settings.json
+!/.vscode/python.env
 .idea/
 *.iml
 *.swp

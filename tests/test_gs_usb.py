@@ -10,7 +10,7 @@ import usb.core
 from gs_usb.constants import GS_CAN_MODE_HW_TIMESTAMP
 from gs_usb.gs_usb_frame import GS_USB_NONE_ECHO_ID, GsUsbFrame
 
-from packages.driver.gs_usb import GsUsbBus
+from can_motor.backends.gs_usb import GsUsbBus
 
 
 class GsUsbFailureTests(unittest.TestCase):
@@ -26,9 +26,9 @@ class GsUsbFailureTests(unittest.TestCase):
             patch("can.interfaces.gs_usb.GsUsb.scan", return_value=[self.adapter])
         )
         patches.enter_context(
-            patch("packages.driver.gs_usb.usb.util.find_descriptor", return_value=SimpleNamespace(wMaxPacketSize=64))
+            patch("can_motor.backends.gs_usb.usb.util.find_descriptor", return_value=SimpleNamespace(wMaxPacketSize=64))
         )
-        self.dispose = patches.enter_context(patch("packages.driver.gs_usb.usb.util.dispose_resources"))
+        self.dispose = patches.enter_context(patch("can_motor.backends.gs_usb.usb.util.dispose_resources"))
 
     def create_bus(self) -> GsUsbBus:
         bus = GsUsbBus(channel=0, bitrate=1_000_000, ignore_config=True)
@@ -101,7 +101,7 @@ class GsUsbFailureTests(unittest.TestCase):
     def test_send_failure_closes_connection_and_preserves_usb_cause(self) -> None:
         bus = self.create_bus()
         original = usb.core.USBError("USB adapter removed", errno=19)
-        self.adapter.send.side_effect = original
+        self.raw_device.write.side_effect = original
 
         with self.assertRaises(can.CanOperationError) as raised:
             bus.send(can.Message(arbitration_id=0x141, data=[0x81]))
@@ -111,10 +111,51 @@ class GsUsbFailureTests(unittest.TestCase):
         self.dispose.assert_called_once_with(self.raw_device)
         self.adapter.stop.assert_not_called()
         self.scan.assert_called_once_with()
-        self.adapter.send.reset_mock()
+        self.raw_device.write.reset_mock()
         with self.assertRaises(can.CanOperationError):
             bus.send(can.Message(arbitration_id=0x141, data=[0x81]))
+        self.raw_device.write.assert_not_called()
+
+    def test_send_uses_bounded_usb_write_without_mutating_message(self) -> None:
+        bus = self.create_bus()
+        self.raw_device.write.return_value = bus._frame_size
+        message = can.Message(arbitration_id=0x141, is_extended_id=False, data=[0x81])
+
+        bus.send(message, timeout=0.0101)
+
+        endpoint, data = self.raw_device.write.call_args.args
+        self.assertEqual(endpoint, 0x02)
+        self.assertEqual(self.raw_device.write.call_args.kwargs, {"timeout": 11})
+        frame = GsUsbFrame()
+        GsUsbFrame.unpack_into(frame, data, True)
+        self.assertEqual(frame.arbitration_id, 0x141)
+        self.assertEqual(frame.can_dlc, 1)
+        self.assertEqual(frame.data[0], 0x81)
+        self.assertEqual(message.data, bytearray([0x81]))
         self.adapter.send.assert_not_called()
+
+    def test_send_timeout_keeps_connection_open_and_does_not_retry(self) -> None:
+        bus = self.create_bus()
+        original = usb.core.USBTimeoutError("Write timed out", errno=110)
+        self.raw_device.write.side_effect = original
+
+        with self.assertRaises(can.CanTimeoutError) as raised:
+            bus.send(can.Message(arbitration_id=0x141, data=[0x81]), timeout=0.01)
+
+        self.assertIs(raised.exception.__cause__, original)
+        self.assertFalse(bus._is_shutdown)
+        self.raw_device.write.assert_called_once()
+        self.dispose.assert_not_called()
+
+    def test_short_write_closes_connection(self) -> None:
+        bus = self.create_bus()
+        self.raw_device.write.return_value = 2
+
+        with self.assertRaisesRegex(can.CanOperationError, "Incomplete gs_usb write"):
+            bus.send(can.Message(arbitration_id=0x141, data=[0x81]), timeout=0.01)
+
+        self.assertTrue(bus._is_shutdown)
+        self.dispose.assert_called_once_with(self.raw_device)
 
     def test_partial_initialization_error_releases_handle_without_destructor_retry(self) -> None:
         original = usb.core.USBError("USB overflow", errno=75)
@@ -134,7 +175,7 @@ class GsUsbFailureTests(unittest.TestCase):
         self.scan.assert_called_once_with()
 
     def test_endpoint_validation_failure_stops_and_releases_started_adapter(self) -> None:
-        with patch("packages.driver.gs_usb.usb.util.find_descriptor", return_value=None):
+        with patch("can_motor.backends.gs_usb.usb.util.find_descriptor", return_value=None):
             with self.assertRaises(can.CanInitializationError):
                 GsUsbBus(channel=0, bitrate=1_000_000, ignore_config=True)
 

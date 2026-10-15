@@ -1,10 +1,21 @@
 [project]
 name = "can-motor"
-version = "0.1.0"
+version = "0.2.0"
+description = "Motor control over the LK-TECH CAN V2.35 protocol with explicit host limits"
 readme = "README.md"
-requires-python = ">=3.14"
+requires-python = ">=3.11,<3.16"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+]
 dependencies = [
-    "python-can[gs-usb]>=4.6.1",
+    # The USB backend adapts these versions' low-level frame and cleanup API.
+    "python-can[gs-usb]==4.6.1",
+    "gs-usb==0.3.1",
 ]
 
 [build-system]
@@ -12,12 +23,11 @@ requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-# Expose editable sources through a path-based .pth file for Pylance/Pyright.
 package-dir = {"" = "."}
 
 [tool.setuptools.packages.find]
-include = ["packages", "packages.*"]
+include = ["can_motor", "can_motor.*"]
 namespaces = false
 
 [tool.setuptools.package-data]
-packages = ["py.typed"]
+can_motor = ["py.typed"]

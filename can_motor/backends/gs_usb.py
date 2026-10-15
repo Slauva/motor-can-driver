@@ -1,15 +1,15 @@
 """gs_usb backend with explicit cleanup when a USB adapter disappears."""
 
 import logging
+import math
 from typing import Any, NoReturn
 
 import can
 import usb.core
 import usb.util
 from can.interfaces.gs_usb import GsUsbBus as PythonCanGsUsbBus
-from gs_usb.constants import CAN_MAX_DLC, GS_CAN_MODE_HW_TIMESTAMP
+from gs_usb.constants import CAN_EFF_FLAG, CAN_ERR_FLAG, CAN_MAX_DLC, CAN_RTR_FLAG, GS_CAN_MODE_HW_TIMESTAMP
 from gs_usb.gs_usb_frame import GS_USB_NONE_ECHO_ID, GsUsbFrame
-
 
 logger = logging.getLogger(__name__)
 
@@ -89,17 +89,43 @@ class GsUsbBus(PythonCanGsUsbBus):
         raise can.CanOperationError(f"gs_usb {operation} failed: {exc}") from exc
 
     def send(self, msg: can.Message, timeout: float | None = None) -> None:
+        """Write one classic frame with a bounded USB bulk transfer.
+
+        The upstream backend ignores ``timeout``. PyUSB uses milliseconds;
+        positive timeouts are rounded up to the next millisecond. ``None``
+        retains the usual unbounded Bus API meaning. A USB timeout leaves the
+        connection open and does not retry: the frame may already be on CAN.
+        """
         self._require_open()
+        if msg.is_fd or not 0 <= msg.dlc <= CAN_MAX_DLC or len(msg.data) > CAN_MAX_DLC:
+            raise can.CanOperationError("gs_usb supports classic CAN frames with at most eight data bytes")
+        if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+            raise ValueError("timeout must be finite and nonnegative, or None")
+        timeout_ms = 0 if timeout is None else max(1, math.ceil(min(timeout, 0xFFFFFFFF / 1000) * 1000))
+        can_id = msg.arbitration_id
+        if msg.is_extended_id:
+            can_id |= CAN_EFF_FLAG
+        if msg.is_remote_frame:
+            can_id |= CAN_RTR_FLAG
+        if msg.is_error_frame:
+            can_id |= CAN_ERR_FLAG
+        frame = GsUsbFrame(can_id=can_id, data=list(msg.data))
+        frame.can_dlc = msg.dlc
+        data = frame.pack(self._hw_timestamps)
         try:
-            super().send(msg, timeout)
-        except can.CanOperationError as exc:
-            if isinstance(exc.__cause__, usb.core.USBError):
-                self._raise_usb_error("send", exc.__cause__)
-            raise
+            written = self.gs_usb.gs_usb.write(0x02, data, timeout=timeout_ms)
+        except usb.core.USBTimeoutError as exc:
+            raise can.CanTimeoutError("gs_usb send timed out; delivery is uncertain") from exc
+        except usb.core.USBError as exc:
+            self._raise_usb_error("send", exc)
+        if written != len(data):
+            self._usb_failed = True
+            self._close_after_failure()
+            raise can.CanOperationError(f"Incomplete gs_usb write: expected {len(data)} bytes, wrote {written}")
 
     def _recv_internal(self, timeout: float | None) -> tuple[can.Message | None, bool]:
         self._require_open()
-        timeout_ms = max(1, round(timeout * 1000)) if timeout else 1
+        timeout_ms = max(1, math.ceil(min(timeout, 0xFFFFFFFF / 1000) * 1000)) if timeout else 1
         try:
             data = self.gs_usb.gs_usb.read(0x81, self._read_size, timeout=timeout_ms)
         except usb.core.USBTimeoutError:
